@@ -8,6 +8,10 @@
 (define-constant ERR-REFUND-CLAIMED (err u106))
 (define-constant ERR-ORACLE-UNAUTHORIZED (err u107))
 
+(define-constant ERR-TRANSFER-NOT-FOUND (err u108))
+(define-constant ERR-TRANSFER-PRICE-MISMATCH (err u109))
+(define-constant ERR-TICKET-ALREADY-LISTED (err u110))
+
 (define-data-var next-event-id uint u1)
 (define-data-var next-ticket-id uint u1)
 
@@ -173,4 +177,78 @@
     ticket (is-eq (get buyer ticket) tx-sender)
     false
   )
+)
+
+(define-map ticket-transfers uint {
+  seller: principal,
+  price: uint,
+  insurance-included: bool,
+  listed-block: uint
+})
+
+(define-public (list-ticket-for-transfer (ticket-id uint) (price uint))
+  (let (
+    (ticket (unwrap! (map-get? tickets ticket-id) ERR-NOT-FOUND))
+    (event (unwrap! (map-get? events (get event-id ticket)) ERR-NOT-FOUND))
+  )
+    (asserts! (is-eq (get buyer ticket) tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (> price u0) ERR-INVALID-AMOUNT)
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (asserts! (is-none (map-get? ticket-transfers ticket-id)) ERR-ALREADY-EXISTS)
+    
+    (map-set ticket-transfers ticket-id {
+      seller: tx-sender,
+      price: price,
+      insurance-included: (get has-insurance ticket),
+      listed-block: stacks-block-height
+    })
+    (ok true)
+  )
+)
+
+(define-public (transfer-ticket (ticket-id uint))
+  (let (
+    (transfer (unwrap! (map-get? ticket-transfers ticket-id) ERR-TRANSFER-NOT-FOUND))
+    (ticket (unwrap! (map-get? tickets ticket-id) ERR-NOT-FOUND))
+    (transfer-price (get price transfer))
+  )
+    (asserts! (> (stx-get-balance tx-sender) transfer-price) ERR-INVALID-AMOUNT)
+    (asserts! (not (is-eq tx-sender (get seller transfer))) ERR-UNAUTHORIZED)
+    
+    (try! (stx-transfer? transfer-price tx-sender (get seller transfer)))
+    
+    (map-set tickets ticket-id (merge ticket {
+      buyer: tx-sender,
+      purchase-block: stacks-block-height
+    }))
+    
+    (map-delete ticket-transfers ticket-id)
+    (ok ticket-id)
+  )
+)
+
+(define-public (cancel-transfer-listing (ticket-id uint))
+  (let ((transfer (unwrap! (map-get? ticket-transfers ticket-id) ERR-TRANSFER-NOT-FOUND)))
+    (asserts! (is-eq (get seller transfer) tx-sender) ERR-UNAUTHORIZED)
+    (map-delete ticket-transfers ticket-id)
+    (ok true)
+  )
+)
+
+(define-read-only (get-ticket-transfer (ticket-id uint))
+  (map-get? ticket-transfers ticket-id)
+)
+
+(define-read-only (get-available-transfers)
+  (filter is-valid-transfer (map get-transfer-id (list 
+    u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20
+  )))
+)
+
+(define-private (get-transfer-id (id uint))
+  id
+)
+
+(define-private (is-valid-transfer (ticket-id uint))
+  (is-some (map-get? ticket-transfers ticket-id))
 )
