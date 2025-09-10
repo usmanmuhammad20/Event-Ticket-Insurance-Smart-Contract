@@ -12,6 +12,10 @@
 (define-constant ERR-TRANSFER-PRICE-MISMATCH (err u109))
 (define-constant ERR-TICKET-ALREADY-LISTED (err u110))
 
+(define-constant PRICE-MULTIPLIER-BASE u100)
+(define-constant MAX-PRICE-INCREASE u200)
+(define-constant URGENCY-BLOCKS u1000)
+
 (define-data-var next-event-id uint u1)
 (define-data-var next-ticket-id uint u1)
 
@@ -251,4 +255,76 @@
 
 (define-private (is-valid-transfer (ticket-id uint))
   (is-some (map-get? ticket-transfers ticket-id))
+)
+
+
+(define-map dynamic-pricing uint {
+  base-price: uint,
+  current-multiplier: uint,
+  last-update-block: uint,
+  demand-factor: uint
+})
+
+(define-public (enable-dynamic-pricing (event-id uint))
+  (let ((event (unwrap! (map-get? events event-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq (get organizer event) tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (map-set dynamic-pricing event-id {
+      base-price: (get ticket-price event),
+      current-multiplier: PRICE-MULTIPLIER-BASE,
+      last-update-block: stacks-block-height,
+      demand-factor: u0
+    })
+    (ok true)
+  )
+)
+
+(define-public (update-ticket-price (event-id uint))
+  (let (
+    (event (unwrap! (map-get? events event-id) ERR-NOT-FOUND))
+    (pricing (unwrap! (map-get? dynamic-pricing event-id) ERR-NOT-FOUND))
+    (sold-percentage (/ (* (get sold-tickets event) u100) (get total-tickets event)))
+    (blocks-until-event (if (> (get date event) stacks-block-height) 
+                          (- (get date event) stacks-block-height) u0))
+    (urgency-multiplier (if (< blocks-until-event URGENCY-BLOCKS)
+                          (+ u100 (/ (* (- URGENCY-BLOCKS blocks-until-event) u50) URGENCY-BLOCKS))
+                          u100))
+    (demand-multiplier (+ u100 (/ sold-percentage u2)))
+    (calculated-multiplier (* urgency-multiplier demand-multiplier))
+    (new-multiplier (if (> calculated-multiplier MAX-PRICE-INCREASE) MAX-PRICE-INCREASE calculated-multiplier))
+  )
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (map-set dynamic-pricing event-id (merge pricing {
+      current-multiplier: new-multiplier,
+      last-update-block: stacks-block-height,
+      demand-factor: sold-percentage
+    }))
+    (ok new-multiplier)
+  )
+)
+
+(define-read-only (get-current-ticket-price (event-id uint))
+  (match (map-get? dynamic-pricing event-id)
+    pricing (let ((event (unwrap! (map-get? events event-id) ERR-NOT-FOUND)))
+              (ok (/ (* (get base-price pricing) (get current-multiplier pricing)) u100)))
+    (match (map-get? events event-id)
+      event (ok (get ticket-price event))
+      ERR-NOT-FOUND
+    )
+  )
+)
+
+(define-read-only (get-pricing-details (event-id uint))
+  (map-get? dynamic-pricing event-id)
+)
+
+(define-read-only (calculate-total-cost-with-pricing (event-id uint) (with-insurance bool))
+  (let (
+    (current-price (unwrap! (get-current-ticket-price event-id) ERR-NOT-FOUND))
+    (event (unwrap! (map-get? events event-id) ERR-NOT-FOUND))
+  )
+    (ok (if with-insurance 
+          (+ current-price (get insurance-fee event))
+          current-price))
+  )
 )
