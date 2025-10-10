@@ -16,6 +16,13 @@
 (define-constant MAX-PRICE-INCREASE u200)
 (define-constant URGENCY-BLOCKS u1000)
 
+(define-constant BRONZE-THRESHOLD u3)
+(define-constant SILVER-THRESHOLD u7)
+(define-constant GOLD-THRESHOLD u15)
+(define-constant BRONZE-DISCOUNT u5)
+(define-constant SILVER-DISCOUNT u10)
+(define-constant GOLD-DISCOUNT u15)
+
 (define-data-var next-event-id uint u1)
 (define-data-var next-ticket-id uint u1)
 
@@ -327,4 +334,95 @@
           (+ current-price (get insurance-fee event))
           current-price))
   )
+)
+
+(define-map user-loyalty principal {
+  total-purchases: uint,
+  tier: (string-ascii 10),
+  lifetime-spent: uint
+})
+
+(define-public (claim-loyalty-tier)
+  (let (
+    (loyalty-data (default-to 
+      {total-purchases: u0, tier: "none", lifetime-spent: u0} 
+      (map-get? user-loyalty tx-sender)))
+    (purchase-count (get total-purchases loyalty-data))
+    (new-tier (get-tier-from-purchases purchase-count))
+  )
+    (map-set user-loyalty tx-sender (merge loyalty-data {tier: new-tier}))
+    (ok new-tier)
+  )
+)
+
+(define-public (buy-ticket-with-loyalty (event-id uint) (with-insurance bool))
+  (let (
+    (event (unwrap! (map-get? events event-id) ERR-NOT-FOUND))
+    (ticket-id (var-get next-ticket-id))
+    (loyalty-data (default-to 
+      {total-purchases: u0, tier: "none", lifetime-spent: u0} 
+      (map-get? user-loyalty tx-sender)))
+    (discount (get-discount-percentage (get tier loyalty-data)))
+    (base-cost (if with-insurance 
+                  (+ (get ticket-price event) (get insurance-fee event))
+                  (get ticket-price event)))
+    (discounted-cost (- base-cost (/ (* base-cost discount) u100)))
+  )
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (asserts! (< (get sold-tickets event) (get total-tickets event)) ERR-INVALID-AMOUNT)
+    (asserts! (>= (stx-get-balance tx-sender) discounted-cost) ERR-INVALID-AMOUNT)
+    
+    (try! (stx-transfer? discounted-cost tx-sender (as-contract tx-sender)))
+    
+    (map-set tickets ticket-id {
+      event-id: event-id,
+      buyer: tx-sender,
+      purchase-block: stacks-block-height,
+      has-insurance: with-insurance,
+      refund-claimed: false
+    })
+    
+    (map-set events event-id (merge event {
+      sold-tickets: (+ (get sold-tickets event) u1)
+    }))
+    
+    (let ((current-tickets (default-to (list) (map-get? event-tickets event-id))))
+      (map-set event-tickets event-id (unwrap! (as-max-len? (append current-tickets ticket-id) u1000) ERR-INVALID-AMOUNT))
+    )
+    
+    (map-set user-loyalty tx-sender {
+      total-purchases: (+ (get total-purchases loyalty-data) u1),
+      tier: (get-tier-from-purchases (+ (get total-purchases loyalty-data) u1)),
+      lifetime-spent: (+ (get lifetime-spent loyalty-data) discounted-cost)
+    })
+    
+    (var-set next-ticket-id (+ ticket-id u1))
+    (ok ticket-id)
+  )
+)
+
+(define-read-only (get-loyalty-status (user principal))
+  (ok (default-to 
+    {total-purchases: u0, tier: "none", lifetime-spent: u0} 
+    (map-get? user-loyalty user)))
+)
+
+(define-private (get-tier-from-purchases (purchases uint))
+  (if (>= purchases GOLD-THRESHOLD)
+    "gold"
+    (if (>= purchases SILVER-THRESHOLD)
+      "silver"
+      (if (>= purchases BRONZE-THRESHOLD)
+        "bronze"
+        "none")))
+)
+
+(define-private (get-discount-percentage (tier (string-ascii 10)))
+  (if (is-eq tier "gold")
+    GOLD-DISCOUNT
+    (if (is-eq tier "silver")
+      SILVER-DISCOUNT
+      (if (is-eq tier "bronze")
+        BRONZE-DISCOUNT
+        u0)))
 )
