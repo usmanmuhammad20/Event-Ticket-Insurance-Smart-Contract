@@ -426,3 +426,106 @@
         BRONZE-DISCOUNT
         u0)))
 )
+
+(define-constant ERR-EARLY-BIRD-NOT-ACTIVE (err u111))
+
+(define-map early-bird-rewards uint {
+  max-reward-percentage: uint,
+  reward-window-blocks: uint,
+  total-rewards-pool: uint,
+  claimed-rewards: uint
+})
+
+(define-map user-early-bird-earnings {user: principal, event-id: uint} uint)
+
+(define-public (enable-early-bird-rewards (event-id uint) (max-reward-percentage uint) (reward-window-blocks uint))
+  (let ((event (unwrap! (map-get? events event-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq (get organizer event) tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (asserts! (<= max-reward-percentage u30) ERR-INVALID-AMOUNT)
+    (asserts! (> reward-window-blocks u0) ERR-INVALID-AMOUNT)
+    (map-set early-bird-rewards event-id {
+      max-reward-percentage: max-reward-percentage,
+      reward-window-blocks: reward-window-blocks,
+      total-rewards-pool: u0,
+      claimed-rewards: u0
+    })
+    (ok true)
+  )
+)
+
+(define-public (buy-ticket-early-bird (event-id uint) (with-insurance bool))
+  (let (
+    (event (unwrap! (map-get? events event-id) ERR-NOT-FOUND))
+    (ticket-id (var-get next-ticket-id))
+    (early-bird (unwrap! (map-get? early-bird-rewards event-id) ERR-EARLY-BIRD-NOT-ACTIVE))
+    (total-cost (if with-insurance 
+                   (+ (get ticket-price event) (get insurance-fee event))
+                   (get ticket-price event)))
+    (blocks-since-creation (- stacks-block-height (get purchase-block (default-to 
+      {event-id: u0, buyer: tx-sender, purchase-block: u0, has-insurance: false, refund-claimed: false}
+      (map-get? tickets u1)))))
+    (time-factor (if (< blocks-since-creation (get reward-window-blocks early-bird))
+                   (- (get reward-window-blocks early-bird) blocks-since-creation)
+                   u0))
+    (reward-percentage (/ (* (get max-reward-percentage early-bird) time-factor) 
+                         (get reward-window-blocks early-bird)))
+    (cashback-reward (/ (* total-cost reward-percentage) u100))
+  )
+    (asserts! (is-eq (get status event) "active") ERR-EVENT-NOT-ACTIVE)
+    (asserts! (< (get sold-tickets event) (get total-tickets event)) ERR-INVALID-AMOUNT)
+    (asserts! (>= (stx-get-balance tx-sender) total-cost) ERR-INVALID-AMOUNT)
+    
+    (try! (stx-transfer? total-cost tx-sender (as-contract tx-sender)))
+    
+    (map-set tickets ticket-id {
+      event-id: event-id,
+      buyer: tx-sender,
+      purchase-block: stacks-block-height,
+      has-insurance: with-insurance,
+      refund-claimed: false
+    })
+    
+    (map-set events event-id (merge event {
+      sold-tickets: (+ (get sold-tickets event) u1)
+    }))
+    
+    (let ((current-tickets (default-to (list) (map-get? event-tickets event-id))))
+      (map-set event-tickets event-id (unwrap! (as-max-len? (append current-tickets ticket-id) u1000) ERR-INVALID-AMOUNT))
+    )
+    
+    (map-set user-early-bird-earnings {user: tx-sender, event-id: event-id} 
+      (+ (default-to u0 (map-get? user-early-bird-earnings {user: tx-sender, event-id: event-id})) 
+         cashback-reward))
+    
+    (map-set early-bird-rewards event-id (merge early-bird {
+      total-rewards-pool: (+ (get total-rewards-pool early-bird) cashback-reward)
+    }))
+    
+    (var-set next-ticket-id (+ ticket-id u1))
+    (ok {ticket-id: ticket-id, cashback: cashback-reward})
+  )
+)
+
+(define-public (claim-early-bird-reward (event-id uint))
+  (let (
+    (event (unwrap! (map-get? events event-id) ERR-NOT-FOUND))
+    (reward-amount (default-to u0 (map-get? user-early-bird-earnings {user: tx-sender, event-id: event-id})))
+  )
+    (asserts! (is-eq (get status event) "completed") ERR-EVENT-NOT-ACTIVE)
+    (asserts! (> reward-amount u0) ERR-INVALID-AMOUNT)
+    
+    (try! (as-contract (stx-transfer? reward-amount tx-sender tx-sender)))
+    
+    (map-delete user-early-bird-earnings {user: tx-sender, event-id: event-id})
+    (ok reward-amount)
+  )
+)
+
+(define-read-only (get-early-bird-config (event-id uint))
+  (map-get? early-bird-rewards event-id)
+)
+
+(define-read-only (get-user-early-bird-balance (user principal) (event-id uint))
+  (ok (default-to u0 (map-get? user-early-bird-earnings {user: user, event-id: event-id})))
+)
